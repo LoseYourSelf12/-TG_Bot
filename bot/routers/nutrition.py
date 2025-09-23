@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
@@ -9,7 +10,7 @@ from db.users import get_user_by_tg
 from db.nutrition import (
     ensure_meal, day_items, day_kcal, list_foods_page, food_by_id, 
     add_meal_item, add_food, month_days_with_meals, days_totals_for_month, 
-    delete_last_item, clear_day, PAGE_SIZE
+    delete_last_item, clear_day, add_custom_meal_item, PAGE_SIZE
 )
 from keyboards.calendar import month_kb
 from keyboards.common import main_menu
@@ -29,12 +30,14 @@ def day_menu(d:date):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить продукт", callback_data="nutri:foods:0")
+    kb.button(text="✍️ Свой продукт", callback_data="nutri:custom")
     kb.button(text="📖 Справочник", callback_data="nutri:foods_view:0")
     kb.button(text="🗑 Удалить последнюю", callback_data="nutri:del:last")
     kb.button(text="🗑 Очистить день", callback_data="nutri:del:all")
     kb.button(text="⬅️ К календарю", callback_data=f"nutri:cal:{d.year}-{d.month}")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def foods_page_kb(rows, offset, total, back_cb="nutri:day:back"):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -201,6 +204,74 @@ async def del_all(c: CallbackQuery, state: FSMContext):
     txt = f"{msg}\n\n<b>{d_iso}</b>\nВсего: {total} ккал\n\n{body}"
     await c.message.edit_text(txt, parse_mode="HTML", reply_markup=day_menu(d))
     await c.answer()
+
+def foods_view_page_kb(rows, offset, total):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    for r in rows:
+        kb.button(text=f"{r['name']} ({r['kcal_100g']} ккал)", callback_data="noop")
+    kb.adjust(1)
+    prev_off = max(offset - PAGE_SIZE, 0)
+    next_off = offset + PAGE_SIZE if offset + PAGE_SIZE < total else offset
+    kb.button(text="←", callback_data=f"nutri:foods_view:{prev_off}")
+    kb.button(text="⬅️ Назад к дню", callback_data="nutri:day:back")
+    kb.button(text="→", callback_data=f"nutri:foods_view:{next_off}")
+    kb.adjust(3)
+    return kb.as_markup()
+
+@router.callback_query(F.data.startswith("nutri:foods_view:"))
+async def foods_view(c: CallbackQuery, state: FSMContext):
+    offset = int(c.data.split(":")[-1])
+    rows, total = await list_foods_page(offset)
+    if not rows:
+        return await c.answer("Справочник пуст. Добавление доступно админам.", show_alert=True)
+    await c.message.edit_text("Справочник продуктов (просмотр):", reply_markup=foods_view_page_kb(rows, offset, total))
+    await c.answer()
+
+@router.callback_query(F.data == "nutri:custom")
+async def custom_start(c: CallbackQuery, state: FSMContext):
+    await state.set_state(State("meal_custom"))
+    example = "Например: Бургер 250 180  (где 250 — ккал на 100 г, 180 — граммы)"
+    await c.message.edit_text(
+        "Введи: <b>название калории граммы</b>\n" + example,
+        parse_mode="HTML"
+    )
+    await c.answer()
+
+@router.message(State("meal_custom"))
+async def custom_save(m: Message, state: FSMContext):
+    # формат: "Название калории граммы"
+    # имя может содержать пробелы; числа допускают запятую
+    raw = (m.text or "").strip()
+    # последний два «слова» — числа, всё перед ними — имя
+    m2 = re.match(r"^(.+?)\s+(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)$", raw)
+    if not m2:
+        return await m.answer("Неверный формат. Пример: Бургер 250 180")
+
+    name = m2.group(1).strip()
+    kcal100 = float(m2.group(2).replace(",", "."))
+    grams = float(m2.group(3).replace(",", "."))
+
+    data = await state.get_data()
+    meal_id = data.get("meal_id")
+    d_iso = data.get("current_day_iso")
+
+    if not meal_id or not d_iso:
+        return await m.answer("Сначала выбери день в календаре.")
+
+    kcal = await add_custom_meal_item(meal_id, name, kcal100, grams)
+    await state.set_state(None)
+
+    # показать обновлённый день
+    from datetime import date as _d
+    d = _d.fromisoformat(d_iso)
+    items = await day_items(meal_id)
+    total = int(await day_kcal(meal_id))
+    body = "\n".join([f"• {r['name']}: {r['grams']} г ≈ {r['kcal']} ккал" for r in items]) or "Записей пока нет."
+    txt = (f"✅ Добавлено: {name} {grams} г (уд. {kcal100} ккал/100г) ≈ {kcal} ккал\n\n"
+           f"<b>{d_iso}</b>\nВсего: {total} ккал\n\n{body}")
+    await m.answer(txt, parse_mode="HTML", reply_markup=day_menu(d))
+
 
 # --- админ: добавление продукта в справочник ---
 @router.message(Command("addfood"))

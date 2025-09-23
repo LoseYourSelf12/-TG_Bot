@@ -41,11 +41,16 @@ async def add_meal_item(meal_id:int, food_id:int, grams:float, kcal:float):
 
 async def day_items(meal_id:int):
     async with await get_conn() as conn:
+        # объединяем название: либо из справочника, либо кастомное
         cur = await conn.execute(
-            "select mi.id, f.name, mi.grams, mi.kcal from meal_items mi join foods f on f.id=mi.food_id where meal_id=%s order by mi.id desc",
+            "select mi.id, coalesce(f.name, mi.food_name) as name, mi.grams, mi.kcal "
+            "from meal_items mi "
+            "left join foods f on f.id=mi.food_id "
+            "where mi.meal_id=%s order by mi.id desc",
             (meal_id,)
         )
         return await cur.fetchall()
+
 
 async def day_kcal(meal_id:int) -> float:
     async with await get_conn() as conn:
@@ -117,3 +122,13 @@ async def clear_day(meal_id:int) -> int:
         cur = await conn.execute("delete from meal_items where meal_id=%s returning id", (meal_id,))
         rows = await cur.fetchall()
         return len(rows)
+
+async def add_custom_meal_item(meal_id:int, name:str, kcal_100g:float, grams:float):
+    kcal = round(grams * float(kcal_100g) / 100.0, 2)
+    async with await get_conn() as conn:
+        await conn.execute(
+            "insert into meal_items(meal_id, food_id, food_name, kcal_100g, grams, kcal) "
+            "values(%s, NULL, %s, %s, %s, %s)",
+            (meal_id, name.strip(), kcal_100g, grams, kcal)
+        )
+    return kcal
