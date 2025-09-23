@@ -1,5 +1,7 @@
 from datetime import date
 from .core import get_conn
+from calendar import monthrange
+from datetime import date as _date
 
 PAGE_SIZE = 8
 
@@ -84,3 +86,34 @@ async def month_days_with_meals(tg_id:int, year:int, month:int) -> set[int]:
         )
         rows = await cur.fetchall()
         return {r["at_date"].day for r in rows}
+    
+async def days_totals_for_month(tg_id:int, year:int, month:int) -> dict[int, float]:
+    async with await get_conn() as conn:
+        cur = await conn.execute("select id from users where tg_id=%s", (tg_id,))
+        u = await cur.fetchone()
+        if not u: return {}
+        start = _date(year, month, 1)
+        end = _date(year, month, monthrange(year, month)[1])
+        cur = await conn.execute("""
+            select m.at_date, coalesce(sum(mi.kcal),0) as total
+            from meals m
+            left join meal_items mi on mi.meal_id = m.id
+            where m.user_id=%s and m.at_date between %s and %s
+            group by m.at_date
+        """, (u["id"], start, end))
+        rows = await cur.fetchall()
+        return {r["at_date"].day: float(r["total"]) for r in rows}
+    
+async def delete_last_item(meal_id:int) -> bool:
+    async with await get_conn() as conn:
+        cur = await conn.execute("select id from meal_items where meal_id=%s order by id desc limit 1", (meal_id,))
+        row = await cur.fetchone()
+        if not row: return False
+        await conn.execute("delete from meal_items where id=%s", (row["id"],))
+        return True
+
+async def clear_day(meal_id:int) -> int:
+    async with await get_conn() as conn:
+        cur = await conn.execute("delete from meal_items where meal_id=%s returning id", (meal_id,))
+        rows = await cur.fetchall()
+        return len(rows)
