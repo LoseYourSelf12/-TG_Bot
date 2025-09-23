@@ -170,3 +170,15 @@ async def edit_weight_set(m: Message, state: FSMContext):
     from aiogram.types import CallbackQuery
     fake = CallbackQuery(id="0", from_user=m.from_user, chat_instance="", message=await m.answer("Обновляю профиль..."))
     await profile_view(fake)
+
+EditWeightExternal = State("Edit:weight")
+
+@router.message(EditWeightExternal)
+async def weight_from_reminder(m: Message, state: FSMContext):
+    txt = (m.text or "").replace(",", ".").strip()
+    import re
+    if not re.fullmatch(r"\d{2,3}(\.\d{1,2})?", txt):
+        return await m.answer("Некорректный формат. Пример: 81.5")
+    await update_user_field(m.from_user.id, "weight_kg", float(txt))
+    await state.clear()
+    await m.answer("Вес обновлён.")

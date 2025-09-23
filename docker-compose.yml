@@ -37,6 +37,23 @@ services:
       KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
       DEFAULT_TZ: ${DEFAULT_TZ}
     depends_on: [postgres, redis, kafka]
+    
+  scheduler:
+    build: ./bot
+    command: ["python","-u","worker_scheduler.py"]
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      PG_DSN_NATIVE: "dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} host=postgres port=5432"
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+    depends_on: [postgres, kafka]
+
+  sender:
+    build: ./bot
+    command: ["python","-u","worker_sender.py"]
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+    depends_on: [kafka]
 
 volumes:
   pgdata:
