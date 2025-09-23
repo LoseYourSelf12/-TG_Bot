@@ -1,0 +1,5 @@
+aiogram>=3.22
+psycopg[binary,pool]>=3.2
+aiokafka>=0.10
+redis>=5
+python-dotenv>=1
