@@ -37,3 +37,9 @@ async def has_any_admin() -> bool:
     async with await get_conn() as conn:
         cur = await conn.execute("select 1 from users where role='admin' limit 1")
         return await cur.fetchone() is not None
+    
+async def delete_user_by_tg(tg_id:int) -> int:
+    async with await get_conn() as conn:
+        cur = await conn.execute("delete from users where tg_id=%s returning id", (tg_id,))
+        rows = await cur.fetchall()
+        return len(rows)
