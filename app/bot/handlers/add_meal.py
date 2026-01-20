@@ -24,40 +24,122 @@ from app.bot.utils.text import (
 from app.db.repo_meals import MealRepo
 from app.db.repo_products import ProductRepo
 
+from app.bot.keyboards.meals import build_day_meals_kb
+from app.bot.keyboards.menu import main_menu_kb
+from app.bot.utils.text import menu_text
+from app.bot.keyboards.calendar import build_month_calendar, CalendarMode
+from app.bot.utils.dates import today_in_tz, clamp_add_range, add_month
+
 
 router = Router()
 
 
+def _grams_kb() -> "object":
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад к выбору продукта", callback_data="grams:back")
+    b.button(text="⬅️ В меню", callback_data="menu:back")
+    b.adjust(1)
+    return b.as_markup()
+
+
+async def _render_return_screen(
+    cq: CallbackQuery,
+    *,
+    state: FSMContext,
+    profile,
+    session: AsyncSession,
+    user_id,
+):
+    """
+    Возврат с шага выбора времени "Назад".
+    """
+    st = await state.get_data()
+    return_to = st.get("return_to")  # например: day:view:YYYY-MM-DD | menu:add | menu:open_month_add:Y:M
+    await state.clear()
+
+    if isinstance(return_to, str) and return_to.startswith("day:view:"):
+        day_str = return_to.split(":", 2)[2]
+        d = date.fromisoformat(day_str)
+        repo = MealRepo(session)
+        meals = await repo.list_meals_by_day(user_id, d)
+        await edit_panel_from_callback(cq, f"День: {d.isoformat()}\n\nВыбери прием пищи или добавь новый.", build_day_meals_kb(d, meals, back_cb="menu:calendar_recent"))
+        return
+
+    if isinstance(return_to, str) and return_to.startswith("menu:open_month_add:"):
+        _, _, _, y, m = return_to.split(":")
+        year, month = int(y), int(m)
+
+        today = today_in_tz(profile.timezone_iana)
+        min_d, max_d = clamp_add_range(today)
+
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        start = date(year, month, 1)
+        end = date(year, month, last_day)
+        repo = MealRepo(session)
+        marks = await repo.month_marks(user_id, start, end)
+
+        kb = build_month_calendar(
+            mode=CalendarMode.ADD,
+            year=year,
+            month=month,
+            marks=marks,
+            min_date=min_d,
+            max_date=max_d,
+            back_cb="menu:add",
+        )
+        await edit_panel_from_callback(cq, "Календарь (добавление):", kb)
+        return
+
+    if return_to == "menu:add":
+        # повторим экран добавления (быстрый)
+        from app.bot.handlers.menu import _render_add_quick
+        await _render_add_quick(cq, profile, session, user_id)
+        return
+
+    await edit_panel_from_callback(cq, menu_text(), main_menu_kb())
+
+
 # ========== entry points ==========
 @router.callback_query(F.data.startswith("day:add:"))
-async def day_add_meal(cq: CallbackQuery, state: FSMContext):
-    # date already selected (from day view)
+async def day_add_meal(cq: CallbackQuery, state: FSMContext, profile):
     _, _, day_str = cq.data.split(":")
     d = date.fromisoformat(day_str)
-    await state.update_data(meal_date=d, replace_meal_id=None)
+
+    await state.update_data(
+        meal_date=d,
+        replace_meal_id=None,
+        return_to=f"day:view:{d.isoformat()}",
+    )
     await state.set_state(AddMealFlow.picking_time)
 
-    now = now_in_tz((await state.get_data()).get("timezone_iana") or "Europe/Moscow")  # fallback; usually profile middleware
+    now = now_in_tz(profile.timezone_iana)
     await edit_panel_from_callback(cq, pick_time_text(d), build_time_picker(now))
 
 
 @router.callback_query(F.data.startswith("calpick:"))
 async def calendar_pick_day(cq: CallbackQuery, state: FSMContext, profile):
-    data = cq.data
-    # using CallbackData parsing:
-    picked = None
+    # общий обработчик клика по календарю: add_meal игнорирует не-ADD
+    from app.bot.keyboards.calendar import CalendarPickCb
+
     try:
-        from app.bot.keyboards.calendar import CalendarPickCb, CalendarMode
-        cb = CalendarPickCb.unpack(data)
-        if cb.mode != CalendarMode.ADD.value:
-            await cq.answer()
-            return
-        picked = date(cb.year, cb.month, cb.day)
+        cb = CalendarPickCb.unpack(cq.data)
     except Exception:
         await cq.answer()
         return
 
-    await state.update_data(meal_date=picked, replace_meal_id=None, timezone_iana=profile.timezone_iana)
+    if cb.mode != CalendarMode.ADD.value:
+        await cq.answer()
+        return
+
+    picked = date(cb.year, cb.month, cb.day)
+
+    await state.update_data(
+        meal_date=picked,
+        replace_meal_id=None,
+        return_to=f"menu:open_month_add:{cb.year}:{cb.month}",
+    )
     await state.set_state(AddMealFlow.picking_time)
 
     now = now_in_tz(profile.timezone_iana)
@@ -65,13 +147,12 @@ async def calendar_pick_day(cq: CallbackQuery, state: FSMContext, profile):
 
 
 # ========== time picker ==========
-@router.callback_query(TimePickCb.filter())
+@router.callback_query(AddMealFlow.picking_time, TimePickCb.filter())
 async def time_picked(cq: CallbackQuery, callback_data: TimePickCb, state: FSMContext, session: AsyncSession, user_id):
     st = await state.get_data()
     d: date = st["meal_date"]
     t = time(hour=callback_data.hh, minute=callback_data.mm)
 
-    # создаем meal сразу после выбора времени (черновик)
     repo = MealRepo(session)
     meal = await repo.create_meal(user_id=user_id, meal_date=d, meal_time=t, note=None)
 
@@ -81,7 +162,7 @@ async def time_picked(cq: CallbackQuery, callback_data: TimePickCb, state: FSMCo
     await edit_panel_from_callback(cq, enter_items_text(d, t), reply_markup=None)
 
 
-@router.callback_query(TimeActionCb.filter(F.action == "custom"))
+@router.callback_query(AddMealFlow.picking_time, TimeActionCb.filter(F.action == "custom"))
 async def time_custom(cq: CallbackQuery, state: FSMContext):
     await state.set_state(AddMealFlow.typing_custom_time)
     await edit_panel_from_callback(cq, enter_custom_time_text(), reply_markup=None)
@@ -104,7 +185,6 @@ async def time_custom_input(message: Message, state: FSMContext, profile, sessio
     st = await state.get_data()
     d: date = st["meal_date"]
 
-    # создаем meal
     repo = MealRepo(session)
     meal = await repo.create_meal(user_id=user_id, meal_date=d, meal_time=t, note=None)
 
@@ -120,11 +200,9 @@ async def time_custom_input(message: Message, state: FSMContext, profile, sessio
     )
 
 
-@router.callback_query(TimeActionCb.filter(F.action == "back"))
-async def time_back(cq: CallbackQuery):
-    # Возвращаем в быстрый календарь дней
-    await cq.answer()
-    await cq.message.edit_text("Вернулся назад. Открой день снова через меню.", reply_markup=None)
+@router.callback_query(AddMealFlow.picking_time, TimeActionCb.filter(F.action == "back"))
+async def time_back(cq: CallbackQuery, state: FSMContext, profile, session: AsyncSession, user_id):
+    await _render_return_screen(cq, state=state, profile=profile, session=session, user_id=user_id)
 
 
 # ========== items text ==========
@@ -161,7 +239,6 @@ async def items_input(message: Message, state: FSMContext, session: AsyncSession
     await state.update_data(item_ids=[str(it.id) for it in items], item_index=0)
     await state.set_state(AddMealFlow.mapping_item)
 
-    # показать кандидатов для первого
     await _render_mapping_step(message.chat.id, message.bot, state, session)
 
 
@@ -191,7 +268,7 @@ async def _render_mapping_step(chat_id: int, bot, state: FSMContext, session: As
 
 
 # ========== mapping ==========
-@router.callback_query(ProductPickCb.filter())
+@router.callback_query(AddMealFlow.mapping_item, ProductPickCb.filter())
 async def product_picked(cq: CallbackQuery, callback_data: ProductPickCb, state: FSMContext, session: AsyncSession):
     item_id = uuid.UUID(callback_data.item_id)
     product_id = uuid.UUID(callback_data.product_id)
@@ -199,17 +276,16 @@ async def product_picked(cq: CallbackQuery, callback_data: ProductPickCb, state:
     repo_m = MealRepo(session)
     await repo_m.set_item_product(item_id, product_id)
 
-    # дальше спрашиваем граммы
     item = await repo_m.get_item(item_id)
     assert item is not None
 
     await state.update_data(current_item_id=str(item_id))
     await state.set_state(AddMealFlow.typing_grams)
 
-    await edit_panel_from_callback(cq, ask_grams_text(item.raw_name), reply_markup=None)
+    await edit_panel_from_callback(cq, ask_grams_text(item.raw_name), reply_markup=_grams_kb())
 
 
-@router.callback_query(ProductActionCb.filter(F.action == "skip"))
+@router.callback_query(AddMealFlow.mapping_item, ProductActionCb.filter(F.action == "skip"))
 async def product_skip(cq: CallbackQuery, callback_data: ProductActionCb, state: FSMContext, session: AsyncSession):
     item_id = uuid.UUID(callback_data.item_id)
 
@@ -222,14 +298,28 @@ async def product_skip(cq: CallbackQuery, callback_data: ProductActionCb, state:
     await state.update_data(current_item_id=str(item_id))
     await state.set_state(AddMealFlow.typing_grams)
 
-    await edit_panel_from_callback(cq, ask_grams_text(item.raw_name), reply_markup=None)
+    await edit_panel_from_callback(cq, ask_grams_text(item.raw_name), reply_markup=_grams_kb())
 
 
-@router.callback_query(ProductActionCb.filter(F.action == "back"))
-async def mapping_back_to_items(cq: CallbackQuery):
-    # Упростим: возвращаем в меню (в MVP)
+@router.callback_query(AddMealFlow.typing_grams, F.data == "grams:back")
+async def grams_back_to_mapping(cq: CallbackQuery, state: FSMContext, session: AsyncSession):
+    st = await state.get_data()
+    cur = st.get("current_item_id")
+    item_ids: list[str] = st.get("item_ids", [])
+    if not cur or cur not in item_ids:
+        await cq.answer()
+        return
+
+    await state.update_data(item_index=item_ids.index(cur))
+    await state.set_state(AddMealFlow.mapping_item)
+    await _render_mapping_step(cq.message.chat.id, cq.bot, state, session)
     await cq.answer()
-    await cq.message.edit_text("Назад. Открой добавление снова через меню/календарь.", reply_markup=None)
+
+
+@router.callback_query(AddMealFlow.mapping_item, ProductActionCb.filter(F.action == "back"))
+async def mapping_back_to_items(cq: CallbackQuery, state: FSMContext, profile, session: AsyncSession, user_id):
+    # MVP: возвращаемся на экран "Назад" откуда пришли (вне item mapping углубляться не будем)
+    await _render_return_screen(cq, state=state, profile=profile, session=session, user_id=user_id)
 
 
 # ========== grams ==========
@@ -248,29 +338,29 @@ async def grams_input(message: Message, state: FSMContext, session: AsyncSession
             chat_id=message.chat.id,
             state=state,
             text="Введи граммы числом > 0 (например 120).",
-            reply_markup=None,
+            reply_markup=_grams_kb(),
         )
         return
 
     repo_m = MealRepo(session)
     await repo_m.set_item_grams_and_kcal(item_id, grams)
 
-    # переходим к следующему item или к фото
     st = await state.get_data()
     idx = int(st["item_index"])
     item_ids: list[str] = st["item_ids"]
 
     idx += 1
     if idx >= len(item_ids):
-        # фото-этап
         await state.set_state(AddMealFlow.waiting_photo)
         await state.update_data(item_index=idx, photos_count=0)
+
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         b = InlineKeyboardBuilder()
         b.button(text="✅ Готово", callback_data="photo:done")
         b.button(text="⏭ Пропустить фото", callback_data="photo:done")
-        b.button(text="⬅️ Назад в меню", callback_data="menu:back")
+        b.button(text="⬅️ В меню", callback_data="menu:back")
         b.adjust(1)
+
         await ensure_panel(
             bot=message.bot,
             chat_id=message.chat.id,
@@ -287,15 +377,13 @@ async def grams_input(message: Message, state: FSMContext, session: AsyncSession
 
 # ========== photos ==========
 @router.message(AddMealFlow.waiting_photo, F.photo)
-async def photo_received(message: Message, state: FSMContext, session: AsyncSession, user_id, db_user):
+async def photo_received(message: Message, state: FSMContext, session: AsyncSession, db_user):
     from app.bot.utils.photos import save_telegram_photo_locally
-    from app.db.repo_meals import MealRepo
 
     st = await state.get_data()
     meal_id = uuid.UUID(st["meal_id"])
     meal_date: date = st["meal_date"]
 
-    # берем самое большое фото
     photo = message.photo[-1]
     saved = await save_telegram_photo_locally(
         bot=message.bot,
@@ -320,11 +408,10 @@ async def photo_received(message: Message, state: FSMContext, session: AsyncSess
     photos_count = int(st.get("photos_count", 0)) + 1
     await state.update_data(photos_count=photos_count)
 
-    # обновим панель
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     b = InlineKeyboardBuilder()
     b.button(text="✅ Готово", callback_data="photo:done")
-    b.button(text="⬅️ Назад в меню", callback_data="menu:back")
+    b.button(text="⬅️ В меню", callback_data="menu:back")
     b.adjust(1)
 
     await ensure_panel(
@@ -338,10 +425,6 @@ async def photo_received(message: Message, state: FSMContext, session: AsyncSess
 
 @router.callback_query(AddMealFlow.waiting_photo, F.data == "photo:done")
 async def photo_done(cq: CallbackQuery, state: FSMContext, session: AsyncSession):
-    """
-    Финализация.
-    Если это редактирование (replace_meal_id) — удаляем старую запись только сейчас.
-    """
     st = await state.get_data()
     replace = st.get("replace_meal_id")
     if replace:
@@ -349,8 +432,4 @@ async def photo_done(cq: CallbackQuery, state: FSMContext, session: AsyncSession
         await repo.delete_meal(uuid.UUID(replace))
 
     await state.clear()
-    await edit_panel_from_callback(cq, "Готово ✅\nЗапись сохранена.", reply_markup=None)
-    # вернем меню
-    from app.bot.keyboards.menu import main_menu_kb
-    from app.bot.utils.text import menu_text
-    await cq.message.edit_text(menu_text(), reply_markup=main_menu_kb())
+    await edit_panel_from_callback(cq, "Готово ✅\nЗапись сохранена.", reply_markup=main_menu_kb())

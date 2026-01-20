@@ -18,6 +18,10 @@ class UserRepo:
         q = select(User).where(User.tg_user_id == tg_user_id)
         return (await self.session.execute(q)).scalars().first()
 
+    async def _get_profile_optional(self, user_id: uuid.UUID) -> Optional[UserProfile]:
+        q = select(UserProfile).where(UserProfile.user_id == user_id)
+        return (await self.session.execute(q)).scalars().first()
+
     async def upsert_user(
         self,
         tg_user_id: int,
@@ -36,21 +40,23 @@ class UserRepo:
                 language_code=language_code,
             )
             self.session.add(user)
-            await self.session.flush()  # получаем user.id
+            await self.session.flush()  # получить user.id
         else:
             user.username = username
             user.first_name = first_name
             user.last_name = last_name
             user.language_code = language_code
 
-        # profile (создаем при необходимости)
-        if user.profile is None:
+        # ВАЖНО: не трогаем user.profile (lazy-load в async может дать MissingGreenlet)
+        profile = await self._get_profile_optional(user.id)
+        if profile is None:
             profile = UserProfile(
                 user_id=user.id,
                 timezone_iana=settings.default_timezone,
                 utc_offset_minutes=settings.default_utc_offset_minutes,
             )
             self.session.add(profile)
+            await self.session.flush()
 
         return user
 

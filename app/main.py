@@ -13,19 +13,27 @@ from app.bot.middlewares.db import DbSessionMiddleware
 from app.bot.middlewares.user_context import UserContextMiddleware
 
 
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # middlewares: сначала сессия БД, потом контекст пользователя
-    dp.update.middleware(DbSessionMiddleware())
-    dp.update.middleware(UserContextMiddleware())
+    db_mw = DbSessionMiddleware()
+    user_mw = UserContextMiddleware()
+
+    dp.message.middleware(db_mw)
+    dp.callback_query.middleware(db_mw)
+
+    dp.message.middleware(user_mw)
+    dp.callback_query.middleware(user_mw)
 
     dp.include_router(build_router())
 
-    # создадим директорию под фото
     os.makedirs(settings.photo_dir, exist_ok=True)
 
     await dp.start_polling(bot)
