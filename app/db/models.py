@@ -96,6 +96,27 @@ class ProductSynonym(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
 
 
+class ProductUser(Base):
+    __tablename__ = "products_user"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_products_user"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"), nullable=False)
+
+    name: Mapped[str] = mapped_column(CITEXT, nullable=False)
+    mapped_product_ref_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.products_ref.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+
 class Meal(Base):
     __tablename__ = "meals"
     __table_args__ = {"schema": SCHEMA}

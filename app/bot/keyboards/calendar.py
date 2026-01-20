@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from typing import Dict, Optional
@@ -13,14 +12,9 @@ from app.db.repo_meals import DayMark
 
 
 class CalendarMode(StrEnum):
-    ADD = "add"
-    STATS = "stats"
-
-
-class CalendarOpenCb(CallbackData, prefix="calopen"):
-    mode: str  # CalendarMode
-    year: int
-    month: int
+    ADD = "add"      # календарь из “Добавить” (с ограничением 30 дней)
+    VIEW = "view"    # календарь из “Календарь (дни)” (без ограничений)
+    STATS = "stats"  # календарь статистики
 
 
 class CalendarNavCb(CallbackData, prefix="calnav"):
@@ -60,10 +54,6 @@ def build_month_calendar(
     back_cb: str = "menu:back",
     show_weekdays: bool = True,
 ) -> InlineKeyboardMarkup:
-    """
-    min_date/max_date: ограничения на кликабельные дни.
-    Если день вне диапазона - callback -> noop.
-    """
     import calendar
 
     cal = calendar.Calendar(firstweekday=0)  # Monday
@@ -71,21 +61,21 @@ def build_month_calendar(
 
     b = InlineKeyboardBuilder()
 
-    # Header row: month + nav
+    # Header
     title = f"{_month_name_ru(month)} {year}"
     b.row(
-        # prev
-        *[
-            InlineKeyboardBuilder().button(
-                text="◀️",
-                callback_data=CalendarNavCb(mode=mode.value, year=year, month=month, direction="prev").pack(),
-            ).as_markup().inline_keyboard[0][0],
-            InlineKeyboardBuilder().button(text=title, callback_data=NoopCb(why="header").pack()).as_markup().inline_keyboard[0][0],
-            InlineKeyboardBuilder().button(
-                text="▶️",
-                callback_data=CalendarNavCb(mode=mode.value, year=year, month=month, direction="next").pack(),
-            ).as_markup().inline_keyboard[0][0],
-        ]
+        InlineKeyboardBuilder().button(
+            text="◀️",
+            callback_data=CalendarNavCb(mode=mode.value, year=year, month=month, direction="prev").pack(),
+        ).as_markup().inline_keyboard[0][0],
+        InlineKeyboardBuilder().button(
+            text=title,
+            callback_data=NoopCb(why="header").pack(),
+        ).as_markup().inline_keyboard[0][0],
+        InlineKeyboardBuilder().button(
+            text="▶️",
+            callback_data=CalendarNavCb(mode=mode.value, year=year, month=month, direction="next").pack(),
+        ).as_markup().inline_keyboard[0][0],
     )
 
     if show_weekdays:
@@ -95,10 +85,9 @@ def build_month_calendar(
 
     # Days
     for week in weeks:
-        row_btns = []
         for d in week:
             if d == 0:
-                row_btns.append((" ", NoopCb(why="empty").pack()))
+                b.button(text=" ", callback_data=NoopCb(why="empty").pack())
                 continue
 
             day_dt = date(year, month, d)
@@ -109,26 +98,17 @@ def build_month_calendar(
                 in_range = False
 
             mark = marks.get(day_dt)
-            # Маркеры: ✅ если есть приемы, 📷 если фото
             label = str(d)
             if mark and mark.meals_count > 0:
                 label += "✅"
             if mark and mark.photos_count > 0:
                 label += "📷"
 
-            cb = (
-                CalendarPickCb(mode=mode.value, year=year, month=month, day=d).pack()
-                if in_range
-                else NoopCb(why="out_of_range").pack()
-            )
-            row_btns.append((label, cb))
-
-        for text, cb in row_btns:
-            b.button(text=text, callback_data=cb)
+            cb = CalendarPickCb(mode=mode.value, year=year, month=month, day=d).pack() if in_range else NoopCb(why="out_of_range").pack()
+            b.button(text=label, callback_data=cb)
 
     b.adjust(3, 7, *([7] * len(weeks)))
 
-    # Footer
     b.row(
         InlineKeyboardBuilder().button(text="⬅️ Назад", callback_data=back_cb).as_markup().inline_keyboard[0][0]
     )

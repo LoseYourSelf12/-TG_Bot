@@ -33,6 +33,8 @@ from app.bot.utils.dates import today_in_tz, clamp_add_range, add_month
 
 router = Router()
 
+from aiogram.filters import StateFilter
+
 
 def _grams_kb() -> "object":
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -67,7 +69,7 @@ async def _render_return_screen(
         return
 
     if isinstance(return_to, str) and return_to.startswith("menu:open_month_add:"):
-        _, _, _, y, m = return_to.split(":")
+        _, _, y, m = return_to.split(":")
         year, month = int(y), int(m)
 
         today = today_in_tz(profile.timezone_iana)
@@ -118,32 +120,24 @@ async def day_add_meal(cq: CallbackQuery, state: FSMContext, profile):
     await edit_panel_from_callback(cq, pick_time_text(d), build_time_picker(now))
 
 
-@router.callback_query(F.data.startswith("calpick:"))
-async def calendar_pick_day(cq: CallbackQuery, state: FSMContext, profile):
-    # общий обработчик клика по календарю: add_meal игнорирует не-ADD
-    from app.bot.keyboards.calendar import CalendarPickCb
+async def _cleanup_draft(session: AsyncSession, state: FSMContext) -> None:
+    data = await state.get_data()
+    meal_id = data.get("meal_id")
+    if meal_id:
+        repo = MealRepo(session)
+        await repo.delete_meal(uuid.UUID(meal_id))
 
-    try:
-        cb = CalendarPickCb.unpack(cq.data)
-    except Exception:
-        await cq.answer()
-        return
 
-    if cb.mode != CalendarMode.ADD.value:
-        await cq.answer()
-        return
-
-    picked = date(cb.year, cb.month, cb.day)
-
-    await state.update_data(
-        meal_date=picked,
-        replace_meal_id=None,
-        return_to=f"menu:open_month_add:{cb.year}:{cb.month}",
-    )
-    await state.set_state(AddMealFlow.picking_time)
-
-    now = now_in_tz(profile.timezone_iana)
-    await edit_panel_from_callback(cq, pick_time_text(picked), build_time_picker(now))
+@router.callback_query(StateFilter(AddMealFlow), F.data == "menu:back")
+async def flow_cancel_to_menu(cq: CallbackQuery, state: FSMContext, session: AsyncSession):
+    # если начали flow и уже создали meal (после выбора времени), удаляем черновик
+    await _cleanup_draft(session, state)
+    await state.clear()
+    from app.bot.utils.text import menu_text
+    from app.bot.keyboards.menu import main_menu_kb
+    from app.config import settings
+    is_admin = cq.from_user.id in settings.admin_ids
+    await edit_panel_from_callback(cq, menu_text(), main_menu_kb(is_admin=is_admin))
 
 
 # ========== time picker ==========

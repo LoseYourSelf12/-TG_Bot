@@ -13,24 +13,21 @@ from app.bot.utils.text import menu_text, calendar_recent_text
 from app.bot.utils.dates import today_in_tz, clamp_add_range
 from app.bot.utils.panel import edit_panel_from_callback
 from app.db.repo_meals import MealRepo
+from app.config import settings
 
 
 router = Router()
 
 
-async def _render_add_quick(
-    cq: CallbackQuery,
-    profile,
-    session: AsyncSession,
-    user_id,
-):
-    # Быстрый выбор: сегодня / вчера / позавчера -> сразу в add-flow
+def _is_admin(tg_user_id: int) -> bool:
+    return tg_user_id in settings.admin_ids
+
+
+async def _render_add_quick(cq: CallbackQuery, profile, session: AsyncSession, user_id):
     today = today_in_tz(profile.timezone_iana)
     days = [today, today - timedelta(days=1), today - timedelta(days=2)]
 
     repo = MealRepo(session)
-
-    # marks для текущего месяца (для ✅📷)
     import calendar
     last_day = calendar.monthrange(today.year, today.month)[1]
     start = date(today.year, today.month, 1)
@@ -46,7 +43,7 @@ async def _render_add_quick(
             label += " ✅"
         if mark and mark.photos_count > 0:
             label += " 📷"
-        b.button(text=label, callback_data=f"day:add:{d.isoformat()}")
+        b.button(text=label, callback_data=f"day:view:{d.isoformat()}")  # <-- теперь всегда day:view
 
     b.button(text="📅 Показать месяц", callback_data=f"menu:open_month_add:{today.year}:{today.month}")
     b.button(text="⬅️ Назад", callback_data="menu:back")
@@ -54,7 +51,7 @@ async def _render_add_quick(
 
     await edit_panel_from_callback(
         cq,
-        "Добавить прием пищи:\n\nВыбери день (быстрый доступ) или открой календарь месяца.",
+        "Добавить прием пищи:\n\nВыбери день (после выбора увидишь записи и кнопку добавления).",
         b.as_markup(),
     )
 
@@ -62,7 +59,7 @@ async def _render_add_quick(
 @router.callback_query(F.data == "menu:back")
 async def back_to_menu(cq: CallbackQuery, state: FSMContext):
     await state.clear()
-    await edit_panel_from_callback(cq, menu_text(), main_menu_kb())
+    await edit_panel_from_callback(cq, menu_text(), main_menu_kb(is_admin=_is_admin(cq.from_user.id)))
 
 
 @router.callback_query(F.data == "menu:add")
@@ -72,7 +69,6 @@ async def menu_add(cq: CallbackQuery, profile, session: AsyncSession, user_id):
 
 @router.callback_query(F.data == "menu:calendar_recent")
 async def calendar_recent(cq: CallbackQuery, profile, session: AsyncSession, user_id):
-    # Это "просмотр дня" (а не добавление): сегодня/вчера/позавчера -> day:view
     today = today_in_tz(profile.timezone_iana)
     days = [today, today - timedelta(days=1), today - timedelta(days=2)]
 
@@ -94,7 +90,7 @@ async def calendar_recent(cq: CallbackQuery, profile, session: AsyncSession, use
             label += " 📷"
         b.button(text=label, callback_data=f"day:view:{d.isoformat()}")
 
-    b.button(text="📅 Показать месяц (добавление)", callback_data=f"menu:open_month_add:{today.year}:{today.month}")
+    b.button(text="📅 Показать месяц", callback_data=f"menu:open_month_view:{today.year}:{today.month}")
     b.button(text="⬅️ Назад", callback_data="menu:back")
     b.adjust(1)
 
@@ -103,7 +99,8 @@ async def calendar_recent(cq: CallbackQuery, profile, session: AsyncSession, use
 
 @router.callback_query(F.data.startswith("menu:open_month_add:"))
 async def open_month_add(cq: CallbackQuery, profile, session: AsyncSession, user_id, state: FSMContext):
-    _, _, _, y, m = cq.data.split(":")
+    # FIX ValueError: 4 части, а не 5
+    _, _, y, m = cq.data.split(":")
     year, month = int(y), int(m)
 
     today = today_in_tz(profile.timezone_iana)
@@ -117,8 +114,8 @@ async def open_month_add(cq: CallbackQuery, profile, session: AsyncSession, user
     repo = MealRepo(session)
     marks = await repo.month_marks(user_id, start, end)
 
-    # чтобы "назад" из выбора времени мог вернуться сюда
-    await state.update_data(return_to=f"menu:open_month_add:{year}:{month}")
+    # сохраняем контекст для кнопки "назад" в day_view
+    await state.update_data(day_back_cb=f"menu:open_month_add:{year}:{month}")
 
     kb = build_month_calendar(
         mode=CalendarMode.ADD,
@@ -129,11 +126,38 @@ async def open_month_add(cq: CallbackQuery, profile, session: AsyncSession, user
         max_date=max_d,
         back_cb="menu:add",
     )
-    await edit_panel_from_callback(cq, "Календарь (добавление):", kb)
+    await edit_panel_from_callback(cq, "Календарь (добавление): выбери день.", kb)
+
+
+@router.callback_query(F.data.startswith("menu:open_month_view:"))
+async def open_month_view(cq: CallbackQuery, profile, session: AsyncSession, user_id, state: FSMContext):
+    _, _, y, m = cq.data.split(":")
+    year, month = int(y), int(m)
+
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    start = date(year, month, 1)
+    end = date(year, month, last_day)
+
+    repo = MealRepo(session)
+    marks = await repo.month_marks(user_id, start, end)
+
+    await state.update_data(day_back_cb=f"menu:open_month_view:{year}:{month}")
+
+    kb = build_month_calendar(
+        mode=CalendarMode.VIEW,
+        year=year,
+        month=month,
+        marks=marks,
+        min_date=None,
+        max_date=None,
+        back_cb="menu:calendar_recent",
+    )
+    await edit_panel_from_callback(cq, "Календарь: выбери день.", kb)
 
 
 @router.callback_query(F.data == "menu:stats")
-async def open_stats(cq: CallbackQuery, profile, session: AsyncSession, user_id):
+async def open_stats(cq: CallbackQuery, profile, session: AsyncSession, user_id, state: FSMContext):
     today = today_in_tz(profile.timezone_iana)
     year, month = today.year, today.month
 
@@ -145,6 +169,8 @@ async def open_stats(cq: CallbackQuery, profile, session: AsyncSession, user_id)
     repo = MealRepo(session)
     marks = await repo.month_marks(user_id, start, end)
 
+    await state.update_data(day_back_cb="menu:stats")
+
     kb = build_month_calendar(
         mode=CalendarMode.STATS,
         year=year,
@@ -154,7 +180,7 @@ async def open_stats(cq: CallbackQuery, profile, session: AsyncSession, user_id)
         max_date=None,
         back_cb="menu:back",
     )
-    await edit_panel_from_callback(cq, "Статистика: выбери день в календаре.", kb)
+    await edit_panel_from_callback(cq, "Статистика: выбери день.", kb)
 
 
 @router.callback_query(F.data == "menu:profile")
@@ -162,8 +188,13 @@ async def profile_stub(cq: CallbackQuery):
     await edit_panel_from_callback(
         cq,
         "Профиль (MVP)\n\n"
-        "Пока профиль создается автоматически.\n"
-        "По умолчанию: Europe/Moscow (UTC+3).\n\n"
-        "Позже добавим ввод параметров (вес/рост/цели).",
-        main_menu_kb(),
+        "Создается автоматически.\n"
+        "По умолчанию: Europe/Moscow (UTC+3).",
+        main_menu_kb(is_admin=_is_admin(cq.from_user.id)),
     )
+
+
+@router.callback_query(F.data == "menu:admin_products")
+async def admin_products_entry(cq: CallbackQuery):
+    # Обработчик объявим в admin handler, тут просто чтобы кнопку не считали “необработанной”
+    await cq.answer()
