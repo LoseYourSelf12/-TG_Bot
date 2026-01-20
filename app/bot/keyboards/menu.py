@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from app.bot.keyboards.calendar import CalendarMode, CalendarNavCb, CalendarOpenCb
+
+
+def main_menu_kb() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🍽 Добавить прием пищи", callback_data="menu:add")
+    b.button(text="📅 Календарь (дни)", callback_data="menu:calendar_recent")
+    b.button(text="📊 Статистика", callback_data="menu:stats")
+    b.button(text="⚙️ Профиль (скоро)", callback_data="menu:profile")
+    b.adjust(1)
+    return b.as_markup()
