@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import date, time, timedelta
 from typing import Dict, List, Optional
 
 from sqlalchemy import select, delete, and_, text, func, outerjoin
@@ -177,3 +177,36 @@ class MealRepo:
                 kcal_total=float(r.kcal_total or 0.0),
             )
         return result
+    
+    async def range_summary(self, user_id: uuid.UUID, start: date, end: date) -> tuple[list[date], list[float], float, int, int]:
+        """
+        Возвращает:
+        - dates (все дни диапазона)
+        - kcal_values по дням (0 если нет)
+        - total_kcal
+        - total_meals
+        - total_photos
+        """
+        marks = await self.month_marks(user_id, start, end)
+
+        days = []
+        kcal_vals = []
+        total_kcal = 0.0
+        total_meals = 0
+        total_photos = 0
+
+        d = start
+        while d <= end:
+            days.append(d)
+            m = marks.get(d)
+            kcal = float(m.kcal_total) if m else 0.0
+            meals = int(m.meals_count) if m else 0
+            photos = int(m.photos_count) if m else 0
+
+            kcal_vals.append(kcal)
+            total_kcal += kcal
+            total_meals += meals
+            total_photos += photos
+            d += timedelta(days=1)
+
+        return days, kcal_vals, total_kcal, total_meals, total_photos

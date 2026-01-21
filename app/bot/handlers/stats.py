@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
-import uuid
+from datetime import date, timedelta
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
@@ -11,9 +10,25 @@ from app.bot.keyboards.calendar import CalendarNavCb, CalendarPickCb, CalendarMo
 from app.bot.utils.dates import add_month, today_in_tz
 from app.bot.utils.panel import edit_panel_from_callback
 from app.db.repo_meals import MealRepo
+from app.bot.utils.charts import kcal_line_chart
 
 
 router = Router()
+
+
+def _week_range(d: date) -> tuple[date, date]:
+    # неделя Пн-Вс
+    start = d - timedelta(days=d.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def _month_range(d: date) -> tuple[date, date]:
+    import calendar
+    start = date(d.year, d.month, 1)
+    last = calendar.monthrange(d.year, d.month)[1]
+    end = date(d.year, d.month, last)
+    return start, end
 
 
 @router.callback_query(NoopCb.filter())
@@ -41,7 +56,7 @@ async def calendar_nav(cq: CallbackQuery, session: AsyncSession, user_id, profil
     marks = await repo.month_marks(user_id, start, end)
 
     mode = CalendarMode(cb.mode)
-    # ограничения только в режиме добавления, но этот обработчик общий
+
     min_d = max_d = None
     if mode == CalendarMode.ADD:
         t = today_in_tz(profile.timezone_iana)
@@ -62,10 +77,6 @@ async def calendar_nav(cq: CallbackQuery, session: AsyncSession, user_id, profil
 
 @router.callback_query(F.data.startswith("calpick:"))
 async def stats_pick_day(cq: CallbackQuery, session: AsyncSession, user_id):
-    """
-    Для режима статистики: клик по дню -> показать дневную статистику.
-    В add_meal.py также есть обработчик calpick, он игнорирует не-ADD.
-    """
     try:
         cb = CalendarPickCb.unpack(cq.data)
     except Exception:
@@ -80,7 +91,6 @@ async def stats_pick_day(cq: CallbackQuery, session: AsyncSession, user_id):
     repo = MealRepo(session)
     meals = await repo.list_meals_by_day(user_id, d)
 
-    # Интервалы между ближайшими приемами (между соседними)
     times = [m.meal_time for m in meals]
     intervals = []
     for i in range(1, len(times)):
@@ -107,11 +117,86 @@ async def stats_pick_day(cq: CallbackQuery, session: AsyncSession, user_id):
         lines.append("")
         lines.append("Интервалы между приемами (мин): " + ", ".join(str(x) for x in intervals))
 
-    # Покажем кнопки: открыть день (список приемов) или назад к календарю
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     b = InlineKeyboardBuilder()
     b.button(text="📋 Открыть день (приемы)", callback_data=f"day:view:{d.isoformat()}")
+    b.button(text="📈 Неделя", callback_data=f"stats:week:{d.isoformat()}")
+    b.button(text="📊 Месяц", callback_data=f"stats:month:{d.isoformat()}")
     b.button(text="⬅️ Назад к календарю", callback_data="menu:stats")
     b.adjust(1)
 
     await edit_panel_from_callback(cq, "\n".join(lines), b.as_markup())
+
+
+@router.callback_query(F.data.startswith("stats:week:"))
+async def stats_week(cq: CallbackQuery, session: AsyncSession, user_id):
+    d = date.fromisoformat(cq.data.split(":")[2])
+    start, end = _week_range(d)
+
+    repo = MealRepo(session)
+    days, kcal_vals, total_kcal, total_meals, total_photos = await repo.range_summary(user_id, start, end)
+
+    avg = total_kcal / len(days) if days else 0.0
+    max_kcal = max(kcal_vals) if kcal_vals else 0.0
+    max_day = days[kcal_vals.index(max_kcal)] if kcal_vals else start
+
+    text = (
+        f"📈 Неделя: {start.isoformat()} — {end.isoformat()}\n\n"
+        f"Всего ккал: {total_kcal:.0f}\n"
+        f"Среднее/день: {avg:.0f}\n"
+        f"Приемов: {total_meals}\n"
+        f"Фото: {total_photos}\n"
+        f"Самый калорийный день: {max_day.isoformat()} ({max_kcal:.0f} ккал)"
+    )
+
+    await cq.answer()
+    await cq.message.edit_text(text, reply_markup=None)
+
+    chart = kcal_line_chart(days, kcal_vals, title=f"Ккал по дням (неделя {start.isoformat()}—{end.isoformat()})")
+    await cq.bot.send_photo(chat_id=cq.message.chat.id, photo=chart)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="📅 Вернуться к дню", callback_data="menu:stats")
+    b.button(text="⬅️ В меню", callback_data="menu:back")
+    b.adjust(1)
+    await cq.bot.send_message(chat_id=cq.message.chat.id, text="Дальше:", reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("stats:month:"))
+async def stats_month(cq: CallbackQuery, session: AsyncSession, user_id):
+    d = date.fromisoformat(cq.data.split(":")[2])
+    start, end = _month_range(d)
+
+    repo = MealRepo(session)
+    days, kcal_vals, total_kcal, total_meals, total_photos = await repo.range_summary(user_id, start, end)
+
+    avg = total_kcal / len(days) if days else 0.0
+    max_kcal = max(kcal_vals) if kcal_vals else 0.0
+    max_day = days[kcal_vals.index(max_kcal)] if kcal_vals else start
+
+    # days_with_records
+    days_with_records = sum(1 for v in kcal_vals if v > 0)
+
+    text = (
+        f"📊 Месяц: {start.strftime('%Y-%m')}\n\n"
+        f"Всего ккал: {total_kcal:.0f}\n"
+        f"Среднее/день: {avg:.0f}\n"
+        f"Дней с записями: {days_with_records}/{len(days)}\n"
+        f"Приемов: {total_meals}\n"
+        f"Фото: {total_photos}\n"
+        f"Самый калорийный день: {max_day.isoformat()} ({max_kcal:.0f} ккал)"
+    )
+
+    await cq.answer()
+    await cq.message.edit_text(text, reply_markup=None)
+
+    chart = kcal_line_chart(days, kcal_vals, title=f"Ккал по дням (месяц {start.strftime('%Y-%m')})")
+    await cq.bot.send_photo(chat_id=cq.message.chat.id, photo=chart)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="📅 Вернуться к календарю", callback_data="menu:stats")
+    b.button(text="⬅️ В меню", callback_data="menu:back")
+    b.adjust(1)
+    await cq.bot.send_message(chat_id=cq.message.chat.id, text="Дальше:", reply_markup=b.as_markup())

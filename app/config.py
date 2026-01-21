@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     default_utc_offset_minutes: int = 180
 
     # пример: ADMIN_IDS=12345,67890
-    admin_ids_raw: str = "6175512444"
+    admin_ids_raw: str = "6175512444,787641710,555776404"
 
     @property
     def admin_ids(self) -> List[int]:

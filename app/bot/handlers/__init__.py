@@ -14,8 +14,8 @@ def build_router() -> Router:
     r.include_router(start_router)
     r.include_router(menu_router)
     r.include_router(add_meal_router)
-    r.include_router(day_view_router)
     r.include_router(stats_router)
+    r.include_router(day_view_router)
     r.include_router(admin_products_router)
     r.include_router(noop_router)
     return r

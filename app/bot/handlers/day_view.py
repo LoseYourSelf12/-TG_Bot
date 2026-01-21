@@ -7,6 +7,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+# from aiogram.exceptions import SkipHandler
 
 from app.bot.keyboards.meals import (
     build_day_meals_kb,
@@ -39,29 +40,20 @@ async def open_day_view(cq: CallbackQuery, session: AsyncSession, user_id, state
     await edit_panel_from_callback(cq, day_view_text(d, meals), kb)
 
 
-@router.callback_query(F.data.startswith("calpick:"))
-async def open_day_from_calendar(cq: CallbackQuery, session: AsyncSession, user_id, state: FSMContext):
-    """
-    Для режимов ADD и VIEW: клик по дню открывает day view.
-    Для STATS — этим занимается stats.py.
-    """
-    try:
-        cb = CalendarPickCb.unpack(cq.data)
-    except Exception:
-        await cq.answer()
-        return
+@router.callback_query(CalendarPickCb.filter(F.mode.in_([CalendarMode.ADD.value, CalendarMode.VIEW.value])))
+async def open_day_from_calendar(
+    cq: CallbackQuery,
+    callback_data: CalendarPickCb,
+    session: AsyncSession,
+    user_id,
+    state: FSMContext,
+):
+    d = date(callback_data.year, callback_data.month, callback_data.day)
 
-    if cb.mode not in (CalendarMode.ADD.value, CalendarMode.VIEW.value):
-        await cq.answer()
-        return
-
-    d = date(cb.year, cb.month, cb.day)
-
-    # задаем корректный "назад"
-    if cb.mode == CalendarMode.ADD.value:
-        await state.update_data(day_back_cb=f"menu:open_month_add:{cb.year}:{cb.month}")
+    if callback_data.mode == CalendarMode.ADD.value:
+        await state.update_data(day_back_cb=f"menu:open_month_add:{callback_data.year}:{callback_data.month}")
     else:
-        await state.update_data(day_back_cb=f"menu:open_month_view:{cb.year}:{cb.month}")
+        await state.update_data(day_back_cb=f"menu:open_month_view:{callback_data.year}:{callback_data.month}")
 
     repo = MealRepo(session)
     meals = await repo.list_meals_by_day(user_id, d)
@@ -83,8 +75,35 @@ async def show_meal(cq: CallbackQuery, callback_data: MealActionCb, session: Asy
     photos = await repo.list_photos(meal_id)
 
     back_cb = f"day:view:{meal.meal_date.isoformat()}"
-    kb = build_meal_actions_kb(meal_id, back_to_day_cb=back_cb)
+    kb = build_meal_actions_kb(meal_id, back_to_day_cb=back_cb, photos_count=len(photos))
     await edit_panel_from_callback(cq, meal_details_text_view(meal, items, photos), kb)
+
+
+@router.callback_query(MealActionCb.filter(F.action == "photos"))
+async def send_meal_photos(cq: CallbackQuery, callback_data: MealActionCb, session: AsyncSession):
+    """
+    Отправляем фото приёма пищи в чат.
+    Используем tg_file_id (быстро, без диска). Если захочешь — можно fallback на local_path.
+    """
+    from aiogram.types import InputMediaPhoto
+
+    meal_id = uuid.UUID(callback_data.meal_id)
+    repo = MealRepo(session)
+    photos = await repo.list_photos(meal_id)
+
+    if not photos:
+        await cq.answer("Фото нет", show_alert=True)
+        return
+
+    # Telegram media group: максимум 10 элементов
+    chunks = [photos[i:i+10] for i in range(0, len(photos), 10)]
+    for chunk in chunks:
+        media = []
+        for p in chunk:
+            media.append(InputMediaPhoto(media=p.tg_file_id))
+        await cq.bot.send_media_group(chat_id=cq.message.chat.id, media=media)
+
+    await cq.answer("Фото отправлены ✅")
 
 
 @router.callback_query(MealActionCb.filter(F.action == "delete"))

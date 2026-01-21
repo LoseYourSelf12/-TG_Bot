@@ -11,14 +11,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.db.models import Meal
 
 
-class DayOpenCb(CallbackData, prefix="dayopen"):
-    day: str  # YYYY-MM-DD
-    mode: str  # "add" | "stats" | "view"
-
-
 class MealActionCb(CallbackData, prefix="mealact"):
     meal_id: str
-    action: str  # "delete" | "delete_confirm" | "edit" | "show"
+    action: str  # "delete" | "delete_confirm" | "edit" | "show" | "photos"
 
 
 def build_day_meals_kb(day: date, meals: Iterable[Meal], back_cb: str = "menu:back") -> InlineKeyboardMarkup:
@@ -33,8 +28,10 @@ def build_day_meals_kb(day: date, meals: Iterable[Meal], back_cb: str = "menu:ba
     return b.as_markup()
 
 
-def build_meal_actions_kb(meal_id: uuid.UUID, back_to_day_cb: str) -> InlineKeyboardMarkup:
+def build_meal_actions_kb(meal_id: uuid.UUID, back_to_day_cb: str, photos_count: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
+    if photos_count > 0:
+        b.button(text=f"📷 Показать фото ({photos_count})", callback_data=MealActionCb(meal_id=str(meal_id), action="photos").pack())
     b.button(text="✏️ Редактировать", callback_data=MealActionCb(meal_id=str(meal_id), action="edit").pack())
     b.button(text="🗑 Удалить", callback_data=MealActionCb(meal_id=str(meal_id), action="delete").pack())
     b.button(text="⬅️ Назад", callback_data=back_to_day_cb)
