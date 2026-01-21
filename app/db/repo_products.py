@@ -23,6 +23,12 @@ class ProductWithSynonyms:
     product: ProductRef
     synonyms: list[str]
 
+@dataclass(frozen=True)
+class RankedCandidate:
+    product_id: uuid.UUID
+    name: str
+    score: float
+    bucket: int     # 0 exact, 1 name, 2 synonym
 
 class ProductRepo:
     def __init__(self, session: AsyncSession):
@@ -80,6 +86,97 @@ class ProductRepo:
             )
             for r in rows
         ]
+    
+    async def search_ranked_candidates(
+        self,
+        query: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[RankedCandidate], int]:
+        """
+        Возвращает кандидатов в порядке:
+        bucket 0: точное совпадение products_ref.name == query
+        bucket 1: частичное совпадение по названию (trgm)
+        bucket 2: частичное совпадение по синонимам (trgm)
+
+        Уникальность по product_id (если совпал и по name и по synonym — берём bucket=min, score=max).
+        """
+        q = (query or "").strip()
+        if not q:
+            return [], 0
+
+        exact = select(
+            ProductRef.id.label("product_id"),
+            ProductRef.name.label("name"),
+            literal(1.0).label("score"),
+            literal(0).label("bucket"),
+        ).where(ProductRef.name == q)
+
+        by_name = select(
+            ProductRef.id.label("product_id"),
+            ProductRef.name.label("name"),
+            func.similarity(ProductRef.name, q).label("score"),
+            literal(1).label("bucket"),
+        ).where(
+            ProductRef.name.op("%")(q)
+        ).where(
+            ProductRef.name != q
+        )
+
+        by_syn = select(
+            ProductRef.id.label("product_id"),
+            ProductRef.name.label("name"),
+            func.similarity(ProductSynonym.synonym, q).label("score"),
+            literal(2).label("bucket"),
+        ).select_from(ProductSynonym).join(
+            ProductRef, ProductRef.id == ProductSynonym.product_ref_id
+        ).where(
+            ProductSynonym.synonym.op("%")(q)
+        )
+
+        merged = union_all(exact, by_name, by_syn).subquery()
+
+        # Схлопываем дубли по product_id:
+        # bucket = min(bucket), score = max(score)
+        grouped = (
+            select(
+                merged.c.product_id,
+                merged.c.name,
+                func.max(merged.c.score).label("score"),
+                func.min(merged.c.bucket).label("bucket"),
+            )
+            .group_by(merged.c.product_id, merged.c.name)
+            .subquery()
+        )
+
+        total_q = select(func.count()).select_from(grouped)
+        total = int((await self.session.execute(total_q)).scalar_one())
+
+        page_q = (
+            select(grouped.c.product_id, grouped.c.name, grouped.c.score, grouped.c.bucket)
+            .order_by(
+                grouped.c.bucket.asc(),
+                grouped.c.score.desc(),
+                grouped.c.name.asc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+
+        rows = (await self.session.execute(page_q)).all()
+        return (
+            [
+                RankedCandidate(
+                    product_id=r.product_id,
+                    name=str(r.name),
+                    score=float(r.score or 0.0),
+                    bucket=int(r.bucket),
+                )
+                for r in rows
+            ],
+            total,
+        )
 
     async def get_product(self, product_id: uuid.UUID) -> ProductRef | None:
         q = select(ProductRef).where(ProductRef.id == product_id)
@@ -195,3 +292,31 @@ class ProductRepo:
         rows = [str(x) for x in (await self.session.execute(q)).scalars().all()]
         # rows будут в “каноническом” виде из БД
         return set(rows)
+    
+    async def find_exact_product(self, text: str) -> ProductRef | None:
+        """
+        1) exact match по products_ref.name (CITEXT -> case-insensitive)
+        2) если не найдено — exact match по product_synonyms.synonym -> связанный product_ref
+        """
+        q = (text or "").strip()
+        if not q:
+            return None
+
+        # 1) exact name
+        r1 = (await self.session.execute(select(ProductRef).where(ProductRef.name == q))).scalars().first()
+        if r1:
+            return r1
+
+        # 2) exact synonym
+        r2 = (
+            await self.session.execute(
+                select(ProductRef)
+                .select_from(ProductSynonym)
+                .join(ProductRef, ProductRef.id == ProductSynonym.product_ref_id)
+                .where(ProductSynonym.synonym == q)
+                .order_by(ProductRef.name.asc())
+                .limit(1)
+            )
+        ).scalars().first()
+
+        return r2

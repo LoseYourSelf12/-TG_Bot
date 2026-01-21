@@ -111,8 +111,10 @@ def meal_details_text_view(meal: Meal, items: list[MealItemView], photos: list[M
             kcal = f"{it.kcal_total:g} ккал" if it.kcal_total is not None else "—"
 
             if it.product_ref_id and it.product_name:
-                # ЯВНО показываем замену
-                name_line = f"✅ {it.product_name} (ввели: {it.raw_name})"
+                if it.product_name.casefold() == it.raw_name.casefold():
+                    name_line = f"✅ {it.product_name}"
+                else:
+                    name_line = f"✅ {it.product_name} (ввели: {it.raw_name})"
             else:
                 name_line = f"❔ {it.raw_name}"
 

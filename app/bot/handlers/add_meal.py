@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.states import AddMealFlow
 from app.bot.keyboards.time_picker import build_time_picker, TimePickCb, TimeActionCb
-from app.bot.keyboards.products import build_product_candidates_kb, ProductPickCb, ProductActionCb
+from app.bot.keyboards.products import build_product_candidates_kb, ProductPickCb, ProductActionCb, ProductPageCb
 from app.bot.utils.dates import now_in_tz
 from app.bot.utils.parse import parse_time_hhmm, snap_to_15, parse_items_csv
 from app.bot.utils.panel import edit_panel_from_callback, ensure_panel
@@ -231,13 +231,19 @@ async def items_input(message: Message, state: FSMContext, session: AsyncSession
     meal.note = message.text.strip()
     items = await repo.create_items_for_meal(meal_id, raw_items)
 
+    # Авто-маппинг: точное совпадение по name или synonym
+    repo_p = ProductRepo(session)
+    for it in items:
+        exact = await repo_p.find_exact_product(it.raw_name)
+        if exact:
+            await repo.set_item_product(it.id, exact.id)
+
     await state.update_data(item_ids=[str(it.id) for it in items], item_index=0)
     await state.set_state(AddMealFlow.mapping_item)
-
     await _render_mapping_step(message.chat.id, message.bot, state, session)
 
 
-async def _render_mapping_step(chat_id: int, bot, state: FSMContext, session: AsyncSession):
+async def _render_mapping_step(chat_id: int, bot, state: FSMContext, session: AsyncSession, page: int = 1):
     st = await state.get_data()
     idx = int(st["item_index"])
     item_ids: list[str] = st["item_ids"]
@@ -248,10 +254,53 @@ async def _render_mapping_step(chat_id: int, bot, state: FSMContext, session: As
     assert item is not None
 
     repo_p = ProductRepo(session)
-    candidates = await repo_p.search_top_candidates(item.raw_name, limit=10)
 
-    kb = build_product_candidates_kb(item_id, candidates)
-    text = map_item_text(item.raw_name, idx + 1, len(item_ids))
+    # Если ещё не выбран продукт — пробуем exact match и ставим его как "выбран по умолчанию",
+    # но всё равно показываем список (как ты хотел).
+    if item.product_ref_id is None:
+        exact = await repo_p.find_exact_product(item.raw_name)
+        if exact:
+            await repo_m.set_item_product(item_id, exact.id)
+
+    # Подтягиваем item заново (чтобы увидеть выбранный product_ref_id)
+    item = await repo_m.get_item(item_id)
+    assert item is not None
+
+    page_size = 10
+    total_candidates = 0
+    candidates = []
+    candidates, total_candidates = await repo_p.search_ranked_candidates(
+        item.raw_name,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+    )
+    total_pages = max(1, (total_candidates + page_size - 1) // page_size)
+    page = max(1, min(total_pages, page))
+
+    kb = build_product_candidates_kb(
+        item_id=item_id,
+        candidates=candidates,
+        selected_product_id=item.product_ref_id,
+        page=page,
+        total_pages=total_pages,
+    )
+
+    # Текст: каноническое имя, если выбрано
+    chosen_line = ""
+    if item.product_ref_id:
+        prod = await repo_p.get_product(item.product_ref_id)
+        if prod:
+            if str(prod.name).casefold() == item.raw_name.casefold():
+                chosen_line = f"Текущее: ✅ {prod.name}\n\n"
+            else:
+                chosen_line = f"Текущее: ✅ {prod.name} (ввели: {item.raw_name})\n\n"
+
+    text = (
+        f"{chosen_line}"
+        f"Продукт {idx + 1}/{len(item_ids)}\n\n"
+        f"Выбери продукт из справочника:\n"
+        f"🎯 точное совпадение → 🔎 похожие по названию → 🔁 похожие синонимы"
+    )
 
     await ensure_panel(
         bot=bot,
@@ -288,7 +337,7 @@ async def product_picked(cq: CallbackQuery, callback_data: ProductPickCb, state:
 
     await edit_panel_from_callback(
         cq,
-        f"Выбрано: ✅ {prod_name}\n\n" + ask_grams_text(item.raw_name),
+        f"Выбрано: ✅ {prod_name}\n\nВведи граммы:",
         reply_markup=_grams_kb(),
     )
 
@@ -329,6 +378,19 @@ async def mapping_back_to_items(cq: CallbackQuery, state: FSMContext, profile, s
     # MVP: возвращаемся на экран "Назад" откуда пришли (вне item mapping углубляться не будем)
     await _render_return_screen(cq, state=state, profile=profile, session=session, user_id=user_id)
 
+
+@router.callback_query(AddMealFlow.mapping_item, ProductPageCb.filter())
+async def product_page(cq: CallbackQuery, callback_data: ProductPageCb, state: FSMContext, session: AsyncSession):
+    item_id = short_to_uuid(callback_data.item)
+
+    # синхронизируем item_index по item_id (на случай, если пользователь листает позже)
+    st = await state.get_data()
+    item_ids: list[str] = st.get("item_ids", [])
+    if str(item_id) in item_ids:
+        await state.update_data(item_index=item_ids.index(str(item_id)))
+
+    await _render_mapping_step(cq.message.chat.id, cq.bot, state, session, page=callback_data.page)
+    await cq.answer()
 
 # ========== grams ==========
 @router.message(AddMealFlow.typing_grams)
