@@ -16,7 +16,7 @@ from app.bot.keyboards.meals import (
 )
 from app.bot.keyboards.calendar import CalendarPickCb, CalendarMode
 from app.bot.utils.panel import edit_panel_from_callback
-from app.bot.utils.text import day_view_text, meal_details_text
+from app.bot.utils.text import day_view_text, meal_details_text, meal_details_text_view
 from app.bot.states import AddMealFlow
 from app.db.repo_meals import MealRepo
 
@@ -79,12 +79,12 @@ async def show_meal(cq: CallbackQuery, callback_data: MealActionCb, session: Asy
         await cq.answer("Не найдено")
         return
 
-    items = await repo.list_items(meal_id)
+    items = await repo.list_items_view(meal_id)
     photos = await repo.list_photos(meal_id)
 
     back_cb = f"day:view:{meal.meal_date.isoformat()}"
     kb = build_meal_actions_kb(meal_id, back_to_day_cb=back_cb)
-    await edit_panel_from_callback(cq, meal_details_text(meal, items, photos), kb)
+    await edit_panel_from_callback(cq, meal_details_text_view(meal, items, photos), kb)
 
 
 @router.callback_query(MealActionCb.filter(F.action == "delete"))

@@ -4,6 +4,7 @@ from datetime import date, time
 from typing import Iterable, Optional
 
 from app.db.models import Meal, MealItem, MealPhoto
+from app.db.repo_meals import MealItemView
 
 
 def menu_text() -> str:
@@ -89,6 +90,33 @@ def meal_details_text(meal: Meal, items: list[MealItem], photos: list[MealPhoto]
             kcal = f"{float(it.kcal_total):g} ккал" if it.kcal_total is not None else "—"
             mapped = "✅" if it.product_ref_id else "❔"
             lines.append(f"• {mapped} {it.raw_name} — {grams} — {kcal}")
+        lines.append("")
+    lines.append(f"Фото: {len(photos)}")
+    return "\n".join(lines)
+
+
+def meal_details_text_view(meal: Meal, items: list[MealItemView], photos: list[MealPhoto]) -> str:
+    lines = [
+        f"Прием пищи: {meal.meal_date.isoformat()} {meal.meal_time.strftime('%H:%M')}",
+        "",
+    ]
+    if meal.note:
+        lines.append(f"Описание: {meal.note}")
+        lines.append("")
+
+    if items:
+        lines.append("Позиции:")
+        for it in items:
+            grams = f"{it.grams:g} г" if it.grams is not None else "—"
+            kcal = f"{it.kcal_total:g} ккал" if it.kcal_total is not None else "—"
+
+            if it.product_ref_id and it.product_name:
+                # ЯВНО показываем замену
+                name_line = f"✅ {it.product_name} (ввели: {it.raw_name})"
+            else:
+                name_line = f"❔ {it.raw_name}"
+
+            lines.append(f"• {name_line} — {grams} — {kcal}")
         lines.append("")
     lines.append(f"Фото: {len(photos)}")
     return "\n".join(lines)

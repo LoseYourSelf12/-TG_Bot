@@ -29,6 +29,7 @@ from app.bot.keyboards.menu import main_menu_kb
 from app.bot.utils.text import menu_text
 from app.bot.keyboards.calendar import build_month_calendar, CalendarMode
 from app.bot.utils.dates import today_in_tz, clamp_add_range, add_month
+from app.bot.utils.ids import short_to_uuid
 
 
 router = Router()
@@ -264,24 +265,37 @@ async def _render_mapping_step(chat_id: int, bot, state: FSMContext, session: As
 # ========== mapping ==========
 @router.callback_query(AddMealFlow.mapping_item, ProductPickCb.filter())
 async def product_picked(cq: CallbackQuery, callback_data: ProductPickCb, state: FSMContext, session: AsyncSession):
-    item_id = uuid.UUID(callback_data.item_id)
-    product_id = uuid.UUID(callback_data.product_id)
+    from app.bot.utils.ids import short_to_uuid
+
+    item_id = short_to_uuid(callback_data.item)
+    product_id = short_to_uuid(callback_data.prod)
 
     repo_m = MealRepo(session)
     await repo_m.set_item_product(item_id, product_id)
 
     item = await repo_m.get_item(item_id)
-    assert item is not None
+    if item is None:
+        await cq.answer("Ошибка: позиция не найдена", show_alert=True)
+        return
+
+    # для подтверждения покажем, что привязали
+    repo_p = ProductRepo(session)
+    prod = await repo_p.get_product(product_id)
+    prod_name = str(prod.name) if prod else "неизвестный продукт"
 
     await state.update_data(current_item_id=str(item_id))
     await state.set_state(AddMealFlow.typing_grams)
 
-    await edit_panel_from_callback(cq, ask_grams_text(item.raw_name), reply_markup=_grams_kb())
+    await edit_panel_from_callback(
+        cq,
+        f"Выбрано: ✅ {prod_name}\n\n" + ask_grams_text(item.raw_name),
+        reply_markup=_grams_kb(),
+    )
 
 
 @router.callback_query(AddMealFlow.mapping_item, ProductActionCb.filter(F.action == "skip"))
 async def product_skip(cq: CallbackQuery, callback_data: ProductActionCb, state: FSMContext, session: AsyncSession):
-    item_id = uuid.UUID(callback_data.item_id)
+    item_id = short_to_uuid(callback_data.item)
 
     repo_m = MealRepo(session)
     await repo_m.set_item_product(item_id, None)

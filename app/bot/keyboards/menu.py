@@ -10,7 +10,7 @@ def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
     b.button(text="📅 Календарь (дни)", callback_data="menu:calendar_recent")
     b.button(text="📊 Статистика", callback_data="menu:stats")
     if is_admin:
-        b.button(text="🛠 Справочник", callback_data="admin_products:list:1")
+        b.button(text="🛠 Справочник", callback_data="apl:1")  # короткий callback
     b.button(text="⚙️ Профиль (скоро)", callback_data="menu:profile")
     b.adjust(1)
     return b.as_markup()

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, time
 from typing import Dict, List, Optional
 
-from sqlalchemy import select, delete, and_, text, func
+from sqlalchemy import select, delete, and_, text, func, outerjoin
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Meal, MealItem, MealPhoto, ProductRef
@@ -16,6 +16,17 @@ class DayMark:
     meals_count: int
     photos_count: int
     kcal_total: float
+
+
+@dataclass(frozen=True)
+class MealItemView:
+    id: uuid.UUID
+    position: int
+    raw_name: str
+    grams: float | None
+    kcal_total: float | None
+    product_ref_id: uuid.UUID | None
+    product_name: str | None
 
 
 class MealRepo:
@@ -55,6 +66,39 @@ class MealRepo:
     async def list_items(self, meal_id: uuid.UUID) -> List[MealItem]:
         q = select(MealItem).where(MealItem.meal_id == meal_id).order_by(MealItem.position.asc())
         return list((await self.session.execute(q)).scalars().all())
+    
+    async def list_items_view(self, meal_id: uuid.UUID) -> list[MealItemView]:
+        """
+        Возвращает позиции приёма пищи + имя продукта из справочника (если выбрано).
+        """
+        j = outerjoin(MealItem, ProductRef, MealItem.product_ref_id == ProductRef.id)
+        q = (
+            select(
+                MealItem.id,
+                MealItem.position,
+                MealItem.raw_name,
+                MealItem.grams,
+                MealItem.kcal_total,
+                MealItem.product_ref_id,
+                ProductRef.name.label("product_name"),
+            )
+            .select_from(j)
+            .where(MealItem.meal_id == meal_id)
+            .order_by(MealItem.position.asc())
+        )
+        rows = (await self.session.execute(q)).all()
+        return [
+            MealItemView(
+                id=r.id,
+                position=r.position,
+                raw_name=r.raw_name,
+                grams=float(r.grams) if r.grams is not None else None,
+                kcal_total=float(r.kcal_total) if r.kcal_total is not None else None,
+                product_ref_id=r.product_ref_id,
+                product_name=str(r.product_name) if r.product_name is not None else None,
+            )
+            for r in rows
+        ]
 
     async def get_item(self, item_id: uuid.UUID) -> Optional[MealItem]:
         q = select(MealItem).where(MealItem.id == item_id)
@@ -63,10 +107,9 @@ class MealRepo:
     async def set_item_product(self, item_id: uuid.UUID, product_ref_id: Optional[uuid.UUID]) -> None:
         item = await self.get_item(item_id)
         if item is None:
-            return
+            raise ValueError(f"MealItem not found: {item_id}")
         item.product_ref_id = product_ref_id
-        item.user_product_id = None  # MVP
-        # kcal_total пересчитаем после ввода grams
+        item.user_product_id = None
 
     async def set_item_grams_and_kcal(self, item_id: uuid.UUID, grams: float) -> None:
         item = await self.get_item(item_id)
